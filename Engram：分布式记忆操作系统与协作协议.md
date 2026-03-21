@@ -3635,9 +3635,9 @@ EFP 不重新发明轮子，而是在已有协议的基础上扩展：
 
 **只做三件事**：
 
-1.  `engram capture` — 存入记忆
-2.  `engram recall` — 带衰减权重的检索
-3.  `engram export / import` — 离线记忆传递
+1.  `memento capture` — 存入记忆
+2.  `memento recall` — 带衰减权重的检索
+3.  `memento export / import` — 离线记忆传递
 
 **砍掉的一切（相比前版 v0.1 进一步砍掉）**：
 
@@ -3655,12 +3655,12 @@ EFP 不重新发明轮子，而是在已有协议的基础上扩展：
 **技术栈（一个文件）**：
 
     +-------------------------------+
-    |  CLI (pip install engram)     |
+    |  CLI (pip install memento)    |
     |                               |
-    |  engram capture "content"     |
-    |  engram recall "query"        |
-    |  engram export / import       |
-    |  engram status / forget       |
+    |  memento capture "content"    |
+    |  memento recall "query"       |
+    |  memento export / import       |
+    |  memento status / forget       |
     +---------------+---------------+
                     |
        AI Agent 通过 Bash/Shell 调用
@@ -3727,13 +3727,13 @@ EFP 不重新发明轮子，而是在已有协议的基础上扩展：
       1. 自动提炼与写入 (Auto-Capture):
          在 Agent 的自定义配置（如 Custom Instructions 或 .clauderc）中注入规则：
          "完成复杂任务或结束对话前，主动总结核心避坑经验与架构决策（<200字），
-          并立刻在终端执行：`engram capture '<你的总结>'`"
+          并立刻在终端执行：`memento capture '<你的总结>'`"
          → 效果: Agent 成为自动档案员，Engram 退到幕后作为纯粹的持久化网关。
 
       2. 隐式团队传承 (Export & Share):
-         核心开发者通过 `engram export > memory.json` 导出沉淀后的项目 SQLite 记忆库。
-         新加入项目的成员执行 `engram import memory.json` 即可继承完整的项目上下文。
-         → 效果: 新成员的 Agent 此后在触发 `engram recall` 时，能直接命中并使用
+         核心开发者通过 `memento export > memory.json` 导出沉淀后的项目 SQLite 记忆库。
+         新加入项目的成员执行 `memento import memory.json` 即可继承完整的项目上下文。
+         → 效果: 新成员的 Agent 此后在触发 `memento recall` 时，能直接命中并使用
                  前辈留下的集体经验，在 v0.1 阶段即以“零架构成本”实现了高维度的知识协同。
 
 **Embedding 离线降级策略**：
@@ -3913,21 +3913,24 @@ def recall(query, max_results=5):
 
 ```bash
 # 核心命令
-engram capture <content> [--type TYPE] [--importance IMPORTANCE] [--tags "a,b"] [--origin human|agent]
-engram recall <query> [--max 5] [--format json|text]
-engram verify <id>               # 人类确认某条 Agent 记忆为可信 → verified=1, 解除 strength 上限
-engram status
-engram forget <id>
-engram export [--filter-type TYPE] [--filter-tags "a,b"] [--output file.json]
-engram import <file.json> [--source "作者名"]
+memento capture <content> [--type TYPE] [--importance IMPORTANCE] [--tags "a,b"] [--origin human|agent]
+memento recall <query> [--max 5] [--mode A|B] [--format json|text]
+memento seed-experiment [--db file.db] [--queries-output file.json] [--format json|text]
+memento setup-experiment [--db-a file.db] [--db-b file.db] [--queries-output file.json] [--manifest-output file.json] [--force] [--format json|text]
+memento eval --queries <file.json> [--mode A|B] [--compare-db other.db] [--compare-mode A|B] [--report-output file.json] [--format json|text]
+memento verify <id>               # 人类确认某条 Agent 记忆为可信 → verified=1, 解除 strength 上限
+memento status
+memento forget <id>
+memento export [--filter-type TYPE] [--filter-tags "a,b"] [--output file.json]
+memento import <file.json> [--source "作者名"]
 
 # 初始化
-engram init                        # 创建 ~/.engram/default.db
+memento init                        # 创建 ~/.memento/default.db
 
 # 示例
-$ engram capture "该项目用 RS256 签名 JWT，密钥在 /config/keys/" --type fact --importance high
+$ memento capture "该项目用 RS256 签名 JWT，密钥在 /config/keys/" --type fact --importance high
 
-$ engram recall "认证" --format json
+$ memento recall "认证" --format json
 [
   { "id": "a1b2", "content": "该项目用 RS256 签名 JWT，密钥在 /config/keys/",
     "type": "fact", "strength": 0.85, "score": 0.78 }
@@ -3938,11 +3941,11 @@ $ engram recall "认证" --format json
 
 ```bash
 # 导出
-engram export --output my-knowledge.json
-engram export --filter-tags "react" --output react.json
+memento export --output my-knowledge.json
+memento export --filter-tags "react" --output react.json
 
 # 导入（strength 上限 0.5，标记来源）
-engram import alice-knowledge.json --source "alice"
+memento import alice-knowledge.json --source "alice"
 ```
 
 **指令文件模板（与前版一致）**：
@@ -3952,21 +3955,21 @@ engram import alice-knowledge.json --source "alice"
 
 ## Engram 长期记忆
 
-本项目使用 engram 管理跨会话记忆。
+本项目使用 memento 管理跨会话记忆。
 
 ### 会话开始时
-运行 `engram recall "项目概况" --format json` 获取背景知识。
+运行 `memento recall "项目概况" --format json` 获取背景知识。
 
 ### 工作期间
-- 遇到不确定的项目约定 → `engram recall "相关问题" --format json`
-- 用户说"记住/总是/不要再/每次" → `engram capture "内容" --type preference --importance critical`
+- 遇到不确定的项目约定 → `memento recall "相关问题" --format json`
+- 用户说"记住/总是/不要再/每次" → `memento capture "内容" --type preference --importance critical`
   （用户明确指示的内容不加 --origin agent，默认为 human，可信度最高）
-- 解决了复杂 bug → `engram capture "过程" --type debugging --origin agent`
-- 做了架构决策 → `engram capture "决策及原因" --type decision --origin agent`
-- 发现项目约定 → `engram capture "约定" --type convention --origin agent`
+- 解决了复杂 bug → `memento capture "过程" --type debugging --origin agent`
+- 做了架构决策 → `memento capture "决策及原因" --type decision --origin agent`
+- 发现项目约定 → `memento capture "约定" --type convention --origin agent`
 
 ### 重要：Agent 写入的记忆带有 strength 上限（0.5）
-Agent 通过 --origin agent 写入的记忆在被人类验证（engram verify）前 strength 不超过 0.5。
+Agent 通过 --origin agent 写入的记忆在被人类验证（memento verify）前 strength 不超过 0.5。
 这防止 Agent 幻觉通过反复 recall 自我强化成"坚不可摧的假记忆"。
 
 ### 判断原则
@@ -3985,7 +3988,7 @@ Agent 通过 --origin agent 写入的记忆在被人类验证（engram verify）
 | Ch17 工程约束     | **部分保留**: rigidity 简化为 importance 参数               |
 | Ch20 Agent 接入 | **保留**: CLI + 指令文件                                 |
 
-**交付物**：`pip install engram` → 一个 SQLite 文件的 AI Agent 长期记忆。1-2 周交付。
+**交付物**：`pip install memento`（原名 engram，已更名） → 一个 SQLite 文件的 AI Agent 长期记忆。1-2 周交付。
 
 ### 22.3 各版本新增能力矩阵
 
@@ -4037,7 +4040,7 @@ v0.1 的目标不是功能完整，是**验证一个假设**：
            ~/.engram/eval_mode_a.db  (实验组)
            ~/.engram/eval_mode_b.db  (基线组)
         2. 日常使用照常跑 Mode A (主库)，正常产生副作用
-        3. 评估时: engram eval --mode B --db eval_mode_b.db --queries eval_queries.json
+        3. 评估时: memento eval --mode B --db eval_mode_b.db --queries eval_queries.json
            对 Mode B 副本执行相同查询集，但不写入副作用 (只读评估)
         4. 对比两组返回结果的排序质量
 
@@ -4045,8 +4048,8 @@ v0.1 的目标不是功能完整，是**验证一个假设**：
         Mode B 是"同一起点、无强化副作用的冻结系统"，
         差异 = 衰减+强化机制的净效果。
 
-      切换方式: engram recall --mode A|B (日常使用)
-                engram eval --queries file.json (实验评估，只读)
+      切换方式: memento recall --mode A|B (日常使用)
+            memento eval --queries file.json (实验评估，只读)
 
     标注集构建 (实验开始前准备):
       1. 预置 50~100 条覆盖多类型的记忆 (fact/decision/convention/debugging)
@@ -4079,12 +4082,12 @@ v0.1 的目标不是功能完整，是**验证一个假设**：
     实验流程:
       Day 0:  构建标注集 + 复制快照 (eval_mode_b.db)
       Week 1: 用 Mode A 正常工作，积累真实的 recall/capture 行为
-      Day 7:  中期评估 — 运行 engram eval，主要观测:
+      Day 7:  中期评估 — 运行 memento eval，主要观测:
               · 过时记忆抑制率 (衰减效果，7 天内应已显现)
               · 冷记忆自然下沉 (同上)
               · 强化增益可能尚不明显 — 仅记录，不做最终判定
       Week 2: 继续用 Mode A 正常工作，强化增益的复利效应开始显现
-      Day 14: 最终评估 — 运行 engram eval，完整对比所有指标
+      Day 14: 最终评估 — 运行 memento eval，完整对比所有指标
       Day 15: 对 eval 结果做人工评分 (1-5 分，"这个结果有用吗")
               汇总 Precision@3 / MRR / 过时抑制率，做决定
 
@@ -4402,7 +4405,7 @@ MemoryPR 的核心载荷。替代旧的快照式 `proposed_engrams` + `proposed_
 
 30. **~~Agent 接入层设计~~** → 三协议接入: MCP Server (Claude Code) + OpenAI Function Schema (Codex) + CLI Wrapper (通用)；统一 6 工具 API；会话三阶段生命周期；项目级 Vault 多 Agent 协作；Context Window = L1 映射（见 20.5-20.8 节）
 
-31. **~~Agent 幻觉强化循环~~** → origin + verified 字段 + strength 固定上限 0.5（未验证 Agent 记忆）+ `engram verify` 命令（见 22.2 节）
+31. **~~Agent 幻觉强化循环~~** → origin + verified 字段 + strength 固定上限 0.5（未验证 Agent 记忆）+ `memento verify` 命令（见 22.2 节）
 
 32. **~~DAG 存储膨胀~~** → 高频标量（strength, last\_accessed）不进 Merkle DAG，物理分离到 SQLite 标量表（见 5.2 节存储分离约束）
 

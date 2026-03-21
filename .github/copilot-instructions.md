@@ -1,14 +1,10 @@
-# ═══ Memento 长期记忆 — Agent 指令模板 ═══
-
-[English Version](CLAUDE.en.md)
-
-## 概述
+# Memento 长期记忆 — Copilot Chat 指令
 
 本项目使用 Memento 管理跨会话记忆。Memento 是一个基于衰减+强化机制的 AI Agent 长期记忆引擎。
 
 ## 会话开始时
 
-运行以下命令获取项目背景知识：
+在开始实质性工作前，先在终端运行以下命令加载项目背景知识：
 
 ```bash
 memento recall "项目概况" --format json
@@ -18,8 +14,9 @@ memento recall "项目概况" --format json
 
 ### 何时查询记忆
 
-- 遇到不确定的项目约定 → `memento recall "相关问题" --format json`
+- 遇到不确定的项目约定 → 在终端运行 `memento recall "相关问题" --format json`
 - 需要回忆之前的架构决策 → `memento recall "相关话题" --format json`
+- 需要查看是否有 bug 或权衡的记录 → `memento recall "调试经验" --format json`
 
 ### 何时写入记忆
 
@@ -45,9 +42,6 @@ Agent 通过 `--origin agent` 写入的记忆有 strength 上限（0.5）。
 ```bash
 memento capture <content> [--type TYPE] [--importance IMPORTANCE] [--tags "a,b"] [--origin human|agent]
 memento recall <query> [--max 5] [--mode A|B] [--format json|text]
-memento seed-experiment [--db file.db] [--queries-output file.json] [--format json|text]
-memento setup-experiment [--db-a file.db] [--db-b file.db] [--queries-output file.json] [--manifest-output file.json] [--force] [--format json|text]
-memento eval --queries <file.json> [--mode A|B] [--compare-db other.db] [--compare-mode A|B] [--report-output file.json] [--format json|text]
 memento verify <id>
 memento forget <id>
 memento status

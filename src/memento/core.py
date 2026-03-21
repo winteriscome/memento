@@ -2,9 +2,8 @@
 
 import json
 import sqlite3
-import struct
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from math import exp
 from typing import Optional
@@ -66,6 +65,9 @@ class MementoCore:
         now = datetime.now().isoformat()
         tags_json = json.dumps(tags, ensure_ascii=False) if tags else None
         verified = 1 if origin == "human" else 0
+        initial_strength = (
+            AGENT_STRENGTH_CAP if origin == "agent" and verified == 0 else 0.7
+        )
 
         # 生成 embedding（可能降级为 None）
         embedding_blob, dim, is_pending = get_embedding(content)
@@ -75,42 +77,56 @@ class MementoCore:
             INSERT INTO engrams
                 (id, content, type, tags, strength, importance, source, origin,
                  verified, created_at, last_accessed, access_count, forgotten,
-                 embedding_pending, embedding)
-            VALUES (?, ?, ?, ?, 0.7, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?)
+                 embedding_pending, embedding_dim, embedding)
+            VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?)
             """,
             (
                 engram_id,
                 content,
                 type,
                 tags_json,
+                initial_strength,
                 importance,
                 origin,
                 verified,
                 now,
                 now,
-                1 if is_pending else 0,
+                int(is_pending),
+                dim or None,
                 embedding_blob,
             ),
         )
         self.conn.commit()
         return engram_id
 
-    def recall(self, query: str, max_results: int = 5) -> list[RecallResult]:
+    def recall(
+        self,
+        query: str,
+        max_results: int = 5,
+        mode: str = "A",
+        read_only: bool | None = None,
+    ) -> list[RecallResult]:
         """
-        向量相似度 × 衰减权重检索。
+        检索记忆。
 
-        1. 向量检索 top-K×3 候选
-        2. 计算 effective_strength × similarity → 排序
-        3. 原子 SQL UPDATE 执行再巩固
+        Mode A: effective_strength × similarity，并对命中结果再巩固。
+        Mode B: similarity × recency_bonus，只读基线，不写副作用。
         """
+        mode = mode.upper()
+        if mode not in {"A", "B"}:
+            raise ValueError("mode must be 'A' or 'B'")
+
         now = datetime.now()
         embedding_blob, dim, is_pending = get_embedding(query)
+        should_reinforce = mode == "A" and read_only is not True
 
         candidates = []
 
         if embedding_blob and not is_pending:
             # 向量检索路径
-            candidates = self._vector_recall(embedding_blob, max_results * 3)
+            candidates = self._vector_recall(
+                embedding_blob, dim, max_results * 3
+            )
 
         if not candidates:
             # FTS5 回退路径
@@ -140,7 +156,12 @@ class MementoCore:
             elif similarity is None:
                 similarity = 0.0
 
-            score = eff * similarity
+            if mode == "A":
+                score = eff * similarity
+            else:
+                score = similarity * self._recency_bonus(
+                    row["created_at"], now
+                )
             scored.append((row, score))
 
         scored.sort(key=lambda x: -x[1])
@@ -149,22 +170,23 @@ class MementoCore:
         # 再巩固 + 构造返回结果
         results = []
         for row, score in top:
-            boost = reinforcement_boost(row["last_accessed"], now)
+            if should_reinforce:
+                boost = reinforcement_boost(row["last_accessed"], now)
 
-            # 原子 UPDATE — 无竞态窗口
-            self.conn.execute(
-                """
-                UPDATE engrams SET
-                    strength = MIN(
-                        CASE WHEN origin = 'agent' AND verified = 0 THEN ? ELSE 1.0 END,
-                        strength + ?
-                    ),
-                    access_count = access_count + 1,
-                    last_accessed = ?
-                WHERE id = ?
-                """,
-                (AGENT_STRENGTH_CAP, boost, now.isoformat(), row["id"]),
-            )
+                # 原子 UPDATE — 无竞态窗口
+                self.conn.execute(
+                    """
+                    UPDATE engrams SET
+                        strength = MIN(
+                            CASE WHEN origin = 'agent' AND verified = 0 THEN ? ELSE 1.0 END,
+                            strength + ?
+                        ),
+                        access_count = access_count + 1,
+                        last_accessed = ?
+                    WHERE id = ?
+                    """,
+                    (AGENT_STRENGTH_CAP, boost, now.isoformat(), row["id"]),
+                )
 
             tags = json.loads(row["tags"]) if row["tags"] else []
 
@@ -201,11 +223,16 @@ class MementoCore:
 
             results.append(result)
 
-        self.conn.commit()
+        if should_reinforce:
+            self.conn.commit()
+
+        # 机会性补填：API 恢复后逐步补填离线期间写入的记忆
+        self.backfill_pending_embeddings(limit=5)
+
         return results
 
     def _vector_recall(
-        self, query_blob: bytes, limit: int
+        self, query_blob: bytes, embedding_dim: int, limit: int
     ) -> list[sqlite3.Row]:
         """sqlite-vec 向量近邻检索。"""
         try:
@@ -214,11 +241,12 @@ class MementoCore:
                 SELECT e.*, vec_distance_cosine(e.embedding, ?) AS distance
                 FROM engrams e
                 WHERE e.embedding IS NOT NULL
+                  AND e.embedding_dim = ?
                   AND e.forgotten = 0
                 ORDER BY distance ASC
                 LIMIT ?
                 """,
-                (query_blob, limit),
+                (query_blob, embedding_dim, limit),
             ).fetchall()
 
             # 将 distance 转为 similarity（cosine distance → cosine similarity）
@@ -233,6 +261,98 @@ class MementoCore:
             return [_DictRow(d) for d in results]
         except Exception:
             return []
+
+    def _recency_bonus(
+        self, created_at: str, now: datetime | None = None
+    ) -> float:
+        """Mode B 的简单时间排序基线。"""
+        if now is None:
+            now = datetime.now()
+
+        created = datetime.fromisoformat(created_at)
+        hours_since_created = (now - created).total_seconds() / 3600.0
+        return 1.0 / (1.0 + hours_since_created * 0.01)
+
+    def evaluate(
+        self,
+        queries: list[dict],
+        max_results: int = 5,
+        mode: str = "A",
+    ) -> dict:
+        """对一组标注查询执行只读评估。"""
+        precision_total = 0.0
+        reciprocal_rank_total = 0.0
+        stale_hit_total = 0
+        labeled_count = 0
+        stale_labeled_count = 0
+        samples = []
+
+        for item in queries:
+            query = item["query"]
+            results = self.recall(
+                query,
+                max_results=max_results,
+                mode=mode,
+                read_only=True,
+            )
+            result_ids = [result.id for result in results]
+            expected_ids = set(item.get("expected_ids", []))
+            stale_ids = set(item.get("stale_ids", []))
+
+            precision_at_3 = None
+            reciprocal_rank = None
+            stale_hit = None
+
+            if expected_ids:
+                hits = sum(
+                    1 for result_id in result_ids[:3] if result_id in expected_ids
+                )
+                precision_at_3 = hits / 3.0
+                reciprocal_rank = 0.0
+                for rank, result_id in enumerate(result_ids, start=1):
+                    if result_id in expected_ids:
+                        reciprocal_rank = 1.0 / rank
+                        break
+                precision_total += precision_at_3
+                reciprocal_rank_total += reciprocal_rank
+                labeled_count += 1
+
+            if stale_ids:
+                stale_hit = any(
+                    result_id in stale_ids for result_id in result_ids[:5]
+                )
+                stale_hit_total += int(stale_hit)
+                stale_labeled_count += 1
+
+            samples.append(
+                {
+                    "query": query,
+                    "result_ids": result_ids,
+                    "precision_at_3": precision_at_3,
+                    "reciprocal_rank": reciprocal_rank,
+                    "stale_hit": stale_hit,
+                }
+            )
+
+        metrics = {
+            "mode": mode.upper(),
+            "query_count": len(queries),
+            "labeled_count": labeled_count,
+            "stale_labeled_count": stale_labeled_count,
+            "precision_at_3": (
+                precision_total / labeled_count if labeled_count else None
+            ),
+            "mrr": (
+                reciprocal_rank_total / labeled_count if labeled_count else None
+            ),
+            "stale_hit_rate": (
+                stale_hit_total / stale_labeled_count
+                if stale_labeled_count
+                else None
+            ),
+            "samples": samples,
+        }
+        return metrics
 
     def _fts_recall(self, query: str, limit: int) -> list[sqlite3.Row]:
         """FTS5 全文检索回退。"""
@@ -287,6 +407,28 @@ class MementoCore:
             """
         ).fetchone()
         return dict(row)
+
+    def backfill_pending_embeddings(self, limit: int = 5) -> int:
+        """为 embedding_pending=1 的记忆补填 embedding，每次最多 limit 条。"""
+        rows = self.conn.execute(
+            "SELECT id, content FROM engrams WHERE embedding_pending = 1 LIMIT ?",
+            (limit,),
+        ).fetchall()
+        if not rows:
+            return 0
+
+        filled = 0
+        for row in rows:
+            blob, dim, still_pending = get_embedding(row["content"])
+            if not still_pending and blob:
+                self.conn.execute(
+                    "UPDATE engrams SET embedding = ?, embedding_dim = ?, embedding_pending = 0 WHERE id = ?",
+                    (blob, dim, row["id"]),
+                )
+                filled += 1
+        if filled:
+            self.conn.commit()
+        return filled
 
     def get_by_id(self, engram_id: str) -> Optional[dict]:
         """根据 ID 查询单条记忆。"""

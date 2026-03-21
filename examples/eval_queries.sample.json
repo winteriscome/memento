@@ -1,0 +1,20 @@
+[
+  {
+    "query": "认证方案",
+    "expected_ids": [
+      "replace-with-current-rs256-memory-id"
+    ],
+    "stale_ids": [
+      "replace-with-deprecated-auth-memory-id"
+    ]
+  },
+  {
+    "query": "部署方式",
+    "expected_ids": [
+      "replace-with-current-deploy-memory-id"
+    ]
+  },
+  {
+    "query": "代码风格偏好"
+  }
+]

@@ -1,5 +1,7 @@
 # Memento
 
+[中文说明](README.zh-CN.md)
+
 **Your long-term memory engine for AI Agents.**
 
 Memento is the implementation of the **Engram** architecture—a distributed memory operating system and collaboration protocol designed to solve the problem of cross-session and cross-project knowledge accumulation and retrieval for AI agents and individuals.
@@ -59,12 +61,77 @@ memento capture "JWT authentication uses RS256, keys are in /config/keys/" --typ
 # Recall context (automatically applies decay & reinforcement weights)
 memento recall "auth" --format json
 
+# Generate a starter experiment dataset and labeled queries
+memento seed-experiment --db eval_mode_a.db --queries-output examples/eval_queries.generated.json
+
+# One-shot setup for both Mode A and Mode B databases
+memento setup-experiment --db-a eval_mode_a.db --db-b eval_mode_b.db --queries-output examples/eval_queries.generated.json --manifest-output examples/experiment_manifest.generated.json
+
+# Run the baseline scorer without reinforcement side effects
+memento recall "auth" --mode B --format json
+
+# Evaluate a labeled query set in read-only mode
+memento eval --queries eval_queries.json --mode A --format json
+
+# Compare two database snapshots directly
+memento eval --queries eval_queries.json --db eval_mode_a.db --mode A --compare-db eval_mode_b.db --compare-mode B --format json
+
+# Save the full evaluation report to a file
+memento eval --queries eval_queries.json --db eval_mode_a.db --mode A --compare-db eval_mode_b.db --compare-mode B --report-output reports/week2.json --format json
+
 # Status & Sync
 memento status
 memento export --output team_memory.json
 ```
 
+`memento recall --mode A` is the experimental scorer (`effective_strength × similarity`).
+`memento recall --mode B` is the baseline scorer (`similarity × recency_bonus`) and does not write reinforcement side effects.
+`memento seed-experiment` writes a small labeled dataset with cold, warm, hot, and stale memories so you can start the v0.1 experiment immediately.
+`memento setup-experiment` creates the A/B database pair, generated query set, and a manifest with the recommended eval command.
+`memento eval` always runs in read-only mode so you can compare isolated database snapshots during the v0.1 experiment.
+Use `--report-output` to save the full JSON report for review history.
+See `examples/eval_queries.sample.json` for the expected query-set format.
+
 For AI Agents, refer to the [CLAUDE.md](./CLAUDE.md) instruction template to automate knowledge co-building.
+
+## Agent Automation
+
+Memento works best when the agent runtime calls it at fixed points rather than relying on manual memory management.
+
+Recommended repository files:
+
+- [CLAUDE.md](CLAUDE.md) for Claude Code
+- [GEMINI.md](GEMINI.md) for Gemini CLI
+- [AGENTS.md](AGENTS.md) for Codex and other generic agents
+- [scripts/memento-agent.sh](scripts/memento-agent.sh) for shared shell helpers
+
+Recommended workflow:
+
+```bash
+source scripts/memento-agent.sh
+memento_project_env
+memento_session_start
+```
+
+This gives all agent runtimes the same project-local database:
+
+```bash
+export MEMENTO_DB="$PWD/.memento/project.db"
+```
+
+Suggested usage pattern:
+
+1. Session start: `memento recall "项目概况" --format json`
+2. On uncertainty: `memento recall "相关问题" --format json`
+3. On completion of substantial work: `memento capture "总结" --type debugging --origin agent`
+
+Wrapper helpers are provided for convenience:
+
+```bash
+claude_memento
+gemini_memento
+codex_memento
+```
 
 ## 📖 Deep Dive
 

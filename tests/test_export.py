@@ -15,8 +15,11 @@ from memento.export import export_memories, import_memories
 def core(tmp_path):
     """创建临时数据库的 MementoCore 实例。"""
     db_path = tmp_path / "test.db"
-    with patch("memento.embedding.get_embedding") as mock_embed:
+    with patch("memento.core.get_embedding") as mock_core_embed, patch(
+        "memento.embedding.get_embedding"
+    ) as mock_embed:
         fake_blob = struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)
+        mock_core_embed.return_value = (fake_blob, 4, False)
         mock_embed.return_value = (fake_blob, 4, False)
         c = MementoCore(db_path=db_path)
         yield c, mock_embed
@@ -106,3 +109,43 @@ def test_export_no_embedding(core):
     memories = export_memories(c)
     for m in memories:
         assert "embedding" not in m
+
+
+def test_export_preserves_last_accessed_and_source(core):
+    """导出应保留时间元数据和来源。"""
+    c, _ = core
+    eid = c.capture("需要导出的元数据")
+    c.conn.execute(
+        "UPDATE engrams SET source = ?, last_accessed = ? WHERE id = ?",
+        ("alice", "2026-03-01T10:00:00", eid),
+    )
+    c.conn.commit()
+
+    memories = export_memories(c)
+    exported = next(m for m in memories if m["id"] == eid)
+    assert exported["source"] == "alice"
+    assert exported["last_accessed"] == "2026-03-01T10:00:00"
+
+
+def test_import_preserves_verified_and_last_accessed(core):
+    """导入应保留可信度与衰减相关时间元数据。"""
+    c, _ = core
+    memories = [
+        {
+            "id": "test-004",
+            "content": "导入元数据",
+            "origin": "human",
+            "verified": True,
+            "source": "alice",
+            "created_at": "2026-02-01T09:00:00",
+            "last_accessed": "2026-02-10T09:00:00",
+            "access_count": 7,
+        }
+    ]
+
+    import_memories(c, memories)
+    row = c.get_by_id("test-004")
+    assert row["verified"] == 1
+    assert row["source"] == "alice"
+    assert row["last_accessed"] == "2026-02-10T09:00:00"
+    assert row["access_count"] == 7

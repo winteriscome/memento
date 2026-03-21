@@ -42,6 +42,20 @@ def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+def _ensure_column(
+    conn: sqlite3.Connection, table: str, column: str, definition: str
+) -> None:
+    """为旧数据库补齐缺失列。"""
+    columns = {
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        )
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     """建表 + FTS5 索引。幂等操作，可重复调用。"""
     conn.executescript(f"""
@@ -60,6 +74,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             access_count    INTEGER DEFAULT 0,
             forgotten       INTEGER DEFAULT 0,
             embedding_pending INTEGER DEFAULT 0,
+            embedding_dim   INTEGER,
             embedding       BLOB
         );
 
@@ -88,4 +103,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_engrams_type
             ON engrams(type);
     """)
+
+    _ensure_column(conn, "engrams", "embedding_dim", "INTEGER")
     conn.commit()
