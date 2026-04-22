@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "memento": {
+      "type": "stdio",
+      "command": "memento-mcp-server",
+      "args": []
+    }
+  },
+  "plugin": ["memento"]
+}

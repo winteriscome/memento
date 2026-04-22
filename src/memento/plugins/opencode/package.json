@@ -1,0 +1,7 @@
+{
+  "name": "opencode-memento-plugin",
+  "version": "0.9.1",
+  "description": "Memento Core integration plugin for OpenCode",
+  "main": "index.js",
+  "type": "module"
+}

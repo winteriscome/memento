@@ -24,8 +24,8 @@ def test_no_decay_at_zero_time():
     assert abs(eff - 0.7) < 1e-6
 
 
-def test_half_life_decay():
-    """经过一个半衰期后，strength 应减半。"""
+def test_decay_at_characteristic_time():
+    """经过一个特征时间H（原半衰期）后，strength 应为 1/sqrt(2)。"""
     now = datetime.now()
     last = (now - timedelta(hours=BASE_HALF_LIFE)).isoformat()
     eff = effective_strength(
@@ -35,7 +35,7 @@ def test_half_life_decay():
         importance="normal",
         now=now,
     )
-    assert abs(eff - 0.5) < 1e-6
+    assert abs(eff - 2**-0.5) < 1e-6
 
 
 def test_access_count_slows_decay():
@@ -93,3 +93,53 @@ def test_needs_review_critical():
     assert needs_review("critical", 0.3) is True
     assert needs_review("critical", 0.8) is False
     assert needs_review("normal", 0.3) is False
+
+
+def test_rigidity_slows_decay():
+    """高 rigidity 记忆应比低 rigidity 衰减更慢。"""
+    now = datetime.now()
+    last = (now - timedelta(hours=BASE_HALF_LIFE)).isoformat()
+
+    eff_no_rigidity = effective_strength(
+        strength=1.0, last_accessed=last, access_count=0,
+        importance="normal", now=now, rigidity=0.0,
+    )
+    eff_mid_rigidity = effective_strength(
+        strength=1.0, last_accessed=last, access_count=0,
+        importance="normal", now=now, rigidity=0.5,
+    )
+    eff_high_rigidity = effective_strength(
+        strength=1.0, last_accessed=last, access_count=0,
+        importance="normal", now=now, rigidity=0.7,
+    )
+    # 更高 rigidity → 更慢衰减 → 更高 effective_strength
+    assert eff_high_rigidity > eff_mid_rigidity > eff_no_rigidity
+
+
+def test_rigidity_zero_has_no_effect():
+    """rigidity=0.0 应该和不传 rigidity 结果一致。"""
+    now = datetime.now()
+    last = (now - timedelta(hours=100)).isoformat()
+
+    eff_default = effective_strength(
+        strength=0.8, last_accessed=last, access_count=3,
+        importance="high", now=now,
+    )
+    eff_zero = effective_strength(
+        strength=0.8, last_accessed=last, access_count=3,
+        importance="high", now=now, rigidity=0.0,
+    )
+    assert abs(eff_default - eff_zero) < 1e-10
+
+
+def test_pinned_memory_barely_decays():
+    """rigidity=1.0 的记忆即使过了两周也应保持大部分强度。"""
+    now = datetime.now()
+    last = (now - timedelta(hours=BASE_HALF_LIFE * 2)).isoformat()  # 两周
+
+    eff = effective_strength(
+        strength=1.0, last_accessed=last, access_count=0,
+        importance="normal", now=now, rigidity=1.0,
+    )
+    # rigidity=1.0 → half_life ×5 → 两周后仍应 > 0.8
+    assert eff > 0.8

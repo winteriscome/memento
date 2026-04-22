@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memento"
-version = "0.1.0"
+version = "0.9.2"
 description = "Your long-term memory engine for AI Agents."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,15 +12,22 @@ license = {text = "MIT"}
 dependencies = [
     "click>=8.0",
     "google-genai>=1.0",
+    "mcp>=1.0",
     "sqlite-vec>=0.1.6",
 ]
 
 [project.optional-dependencies]
 local = ["sentence-transformers>=2.0"]
 dev = ["pytest>=7.0"]
+dashboard = ["fastapi>=0.100", "uvicorn[standard]>=0.20"]
 
 [project.scripts]
 memento = "memento.cli:main"
+memento-worker = "memento.worker:main"
+memento-mcp-server = "memento.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+memento = ["scripts/*.sh", "dashboard/static/**"]

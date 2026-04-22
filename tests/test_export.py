@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from memento.core import MementoCore
-from memento.export import export_memories, import_memories
+from memento.export import export_memories, export_nexus, export_full, import_memories
 
 
 @pytest.fixture
@@ -149,3 +149,71 @@ def test_import_preserves_verified_and_last_accessed(core):
     assert row["source"] == "alice"
     assert row["last_accessed"] == "2026-02-10T09:00:00"
     assert row["access_count"] == 7
+
+
+# ── v0.5 新增测试 ──
+
+
+def test_export_nexus_empty(core):
+    """无 nexus 数据时导出为空列表。"""
+    c, _ = core
+    nexus = export_nexus(c)
+    assert nexus == []
+
+
+def test_export_full_format(core):
+    """export_full 返回 version 2 格式。"""
+    c, _ = core
+    c.capture("测试", type="fact")
+    result = export_full(c)
+    assert result["version"] == 2
+    assert "memories" in result
+    assert "nexus" in result
+    assert len(result["memories"]) == 1
+
+
+def test_import_with_nexus(core):
+    """导入 engrams + nexus 数据。"""
+    c, _ = core
+    memories = [
+        {"id": "nx-001", "content": "记忆A", "type": "fact"},
+        {"id": "nx-002", "content": "记忆B", "type": "fact"},
+    ]
+    nexus = [
+        {
+            "id": "link-001",
+            "source_id": "nx-001",
+            "target_id": "nx-002",
+            "type": "related",
+            "association_strength": 0.8,
+        }
+    ]
+    result = import_memories(c, memories, nexus=nexus)
+    assert result["imported"] == 2
+    assert result["nexus_imported"] == 1
+
+    # 验证 nexus 数据存在
+    row = c.conn.execute("SELECT * FROM nexus WHERE id='link-001'").fetchone()
+    assert row is not None
+    assert row["source_id"] == "nx-001"
+
+
+def test_import_nexus_idempotent(core):
+    """重复导入 nexus 应跳过。"""
+    c, _ = core
+    memories = [
+        {"id": "nx-003", "content": "记忆C"},
+        {"id": "nx-004", "content": "记忆D"},
+    ]
+    nexus = [
+        {
+            "id": "link-002",
+            "source_id": "nx-003",
+            "target_id": "nx-004",
+            "type": "causal",
+        }
+    ]
+    r1 = import_memories(c, memories, nexus=nexus)
+    r2 = import_memories(c, memories, nexus=nexus)
+    assert r1["nexus_imported"] == 1
+    assert r2["nexus_skipped"] == 1

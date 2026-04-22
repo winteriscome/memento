@@ -54,12 +54,15 @@ class MementoCore:
         importance: str = "normal",
         tags: list[str] | None = None,
         origin: str = "human",
+        source_session_id: str | None = None,
+        source_event_id: str | None = None,
     ) -> str:
         """
         写入一条记忆。返回 engram ID。
 
         - origin='human' → verified=1（用户直接输入，可信度最高）
         - origin='agent' → verified=0（Agent 自动写入，strength 上限 0.5）
+        - source_session_id / source_event_id 记录来源追踪
         """
         engram_id = str(uuid.uuid4())
         now = datetime.now().isoformat()
@@ -77,8 +80,10 @@ class MementoCore:
             INSERT INTO engrams
                 (id, content, type, tags, strength, importance, source, origin,
                  verified, created_at, last_accessed, access_count, forgotten,
-                 embedding_pending, embedding_dim, embedding)
-            VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+                 embedding_pending, embedding_dim, embedding,
+                 source_session_id, source_event_id)
+            VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 0, 0, ?, ?, ?,
+                    ?, ?)
             """,
             (
                 engram_id,
@@ -94,9 +99,11 @@ class MementoCore:
                 int(is_pending),
                 dim or None,
                 embedding_blob,
+                source_session_id,
+                source_event_id,
             ),
         )
-        self.conn.commit()
+        # 不在这里 commit — 由调用方（api.py）控制事务边界
         return engram_id
 
     def recall(
@@ -105,12 +112,16 @@ class MementoCore:
         max_results: int = 5,
         mode: str = "A",
         read_only: bool | None = None,
+        reinforce: bool = False,
     ) -> list[RecallResult]:
         """
         检索记忆。
 
-        Mode A: effective_strength × similarity，并对命中结果再巩固。
+        Mode A: effective_strength × similarity，reinforce=True 时再巩固。
         Mode B: similarity × recency_bonus，只读基线，不写副作用。
+
+        v0.2 变更：默认只读（reinforce=False）。显式 reinforce=True 才触发强化。
+        保留 read_only 参数用于向后兼容（read_only=True 强制覆盖 reinforce）。
         """
         mode = mode.upper()
         if mode not in {"A", "B"}:
@@ -118,12 +129,14 @@ class MementoCore:
 
         now = datetime.now()
         embedding_blob, dim, is_pending = get_embedding(query)
-        should_reinforce = mode == "A" and read_only is not True
+        should_reinforce = mode == "A" and reinforce and read_only is not True
 
         candidates = []
 
-        if embedding_blob and not is_pending:
-            # 向量检索路径
+        from memento.db import VEC_AVAILABLE
+
+        if embedding_blob and not is_pending and VEC_AVAILABLE:
+            # 向量检索路径（仅当 sqlite-vec 可用时）
             candidates = self._vector_recall(
                 embedding_blob, dim, max_results * 3
             )
@@ -173,7 +186,7 @@ class MementoCore:
             if should_reinforce:
                 boost = reinforcement_boost(row["last_accessed"], now)
 
-                # 原子 UPDATE — 无竞态窗口
+                # 强化：提升 strength + 记录访问
                 self.conn.execute(
                     """
                     UPDATE engrams SET
@@ -186,6 +199,17 @@ class MementoCore:
                     WHERE id = ?
                     """,
                     (AGENT_STRENGTH_CAP, boost, now.isoformat(), row["id"]),
+                )
+            elif mode == "A" and read_only is not True:
+                # 非强化：只记录访问元数据，不修改 strength
+                self.conn.execute(
+                    """
+                    UPDATE engrams SET
+                        access_count = access_count + 1,
+                        last_accessed = ?
+                    WHERE id = ?
+                    """,
+                    (now.isoformat(), row["id"]),
                 )
 
             tags = json.loads(row["tags"]) if row["tags"] else []
@@ -393,7 +417,7 @@ class MementoCore:
         return cursor.rowcount > 0
 
     def status(self) -> dict:
-        """返回数据库统计信息。"""
+        """返回数据库统计信息（含 session 统计）。"""
         row = self.conn.execute(
             """
             SELECT
@@ -406,7 +430,32 @@ class MementoCore:
             FROM engrams
             """
         ).fetchone()
-        return dict(row)
+        stats = dict(row)
+
+        # session 统计
+        session_row = self.conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total_sessions,
+                SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_sessions,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_sessions
+            FROM sessions
+            """
+        ).fetchone()
+        if session_row:
+            stats.update(dict(session_row))
+
+        # observation 统计
+        obs_row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS total_observations
+            FROM session_events WHERE event_type = 'observation'
+            """
+        ).fetchone()
+        if obs_row:
+            stats["total_observations"] = obs_row["total_observations"]
+
+        return stats
 
     def backfill_pending_embeddings(self, limit: int = 5) -> int:
         """为 embedding_pending=1 的记忆补填 embedding，每次最多 limit 条。"""

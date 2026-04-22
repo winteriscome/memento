@@ -1,0 +1,9 @@
+{
+  "name": "memento",
+  "description": "Long-term memory engine for AI Agents — automatic session tracking, observation capture, and memory recall via MCP.",
+  "author": {
+    "name": "memento"
+  },
+  "version": "0.5.1",
+  "keywords": ["memory", "context", "hooks", "mcp", "session"]
+}
