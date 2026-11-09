@@ -133,7 +133,7 @@ def awake_recall(
     from memento.decay import effective_strength as compute_eff_strength
     from memento.rigidity import RIGIDITY_DEFAULTS
 
-    now = datetime.now()  # naive, matching core.py and DB timestamps
+    now = datetime.now(timezone.utc)
     results = []
 
     # ── Source 1: view_engrams (consolidated memories) ──────────────────
@@ -194,7 +194,9 @@ def awake_recall(
 
     # Score view candidates with effective_strength + rigidity
     for c in view_candidates:
-        rigidity = c.get("rigidity") or RIGIDITY_DEFAULTS.get(c.get("type", "fact"), 0.0)
+        rigidity = c.get("rigidity")
+        if rigidity is None:
+            rigidity = RIGIDITY_DEFAULTS.get(c.get("type", "fact"), 0.0)
         eff = compute_eff_strength(
             strength=c["strength"],
             last_accessed=c["last_accessed"],
@@ -278,16 +280,6 @@ def awake_recall(
     # Sort by score desc, take top-K
     results.sort(key=lambda r: r["score"], reverse=True)
     results = results[:max_results]
-
-    # 记录访问元数据（不修改 strength）
-    now_iso = now.isoformat()
-    for r in results:
-        if not r["provisional"]:
-            conn.execute(
-                "UPDATE engrams SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-                (now_iso, r["id"]),
-            )
-    conn.commit()
 
     # PulseEvents for view_engrams hits only (not hot buffer)
     if pulse_queue is not None:

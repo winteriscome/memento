@@ -1,5 +1,8 @@
 # Engram：分布式记忆操作系统与协作协议
 
+> **实现与安全状态更正**：本文同时包含远期设计和已有实现。当前 Epoch 不自动覆盖再巩固内容，而是保存候选及原文；T5 抽象化尚未实现。衰减按读取/归档时间计算，代码中的 `half_life` 是尺度参数，真实半衰期为其三倍。拓扑噪声并无抵抗多视图交集或串谋攻击的隐私证明；联邦相关内容仅为设计草案。旧数据库中已折叠的历史衰减无法准确还原。详见仓库代码与测试。
+
+
 ## 完整系统设计文档
 
 ### 阅读导引
@@ -15,7 +18,7 @@
 | **v0.5.1** | E2E 集成 + 打包 | Worker 修复、集成测试、`memento plugin install claude`、Entry Points | ✅ 已完成 | — |
 | **v0.6.0** | 检索修复 + Agent 感知增强 | awake_recall 向量/FTS5 检索、staleness_level、capture exclusion rules、memento_prime 增强 | ✅ 已完成 | Ch23.3.1 |
 | **v0.6.1** | 摄取安全网 + 自动摘要兜底 | session_end 自动摘要兜底、auto_captures_count、`memento://daily/today` 资源 | ✅ 已完成 | Ch23.3.2 |
-| **v0.7.0** | LLM 管线 + Epoch 智能化 | Phase 2 L2→L3 结构化、Phase 5 再巩固、Epoch light 自动触发、T5 抽象化 | ✅ 已完成 | Ch23.3.3 |
+| **v0.7.0** | LLM 管线 + Epoch 智能化 | Phase 2 L2→L3 结构化、Phase 5 再巩固候选、Epoch light 自动触发；T5 抽象化未实现 | 部分完成 | Ch23.3.3 |
 | **v0.8.0** | Web Dashboard | 本地 Web Dashboard（FastAPI + Vue 3）、12 REST API 端点、记忆/会话/系统三视图 | ✅ 已完成 | Ch23.3.4 |
 | **v0.9.0** | Conversation Memory Extraction | Stop hook + transcript 增量提炼、LLM 自动提取对话中的高价值记忆 | ✅ 已完成 | Ch23.3.5 |
 | **v0.9.2** | MemPalace-Inspired Enhancements | 分层上下文注入（L0/L1/L2）、本地嵌入优先、时序 Nexus 生命周期 | 🚧 进行中 | Spec: `docs/superpowers/specs/2026-04-10-v092-mempalace-inspired-enhancements-design.md` |
@@ -502,7 +505,7 @@ episodic 记忆默认 rigidity = 0.15，属于 Layer B 可修改范围。用户�
 *   衰减速率受以下因素调节：
     *   被提取次数越多 → 越慢衰减
     *   情绪强度越高 → 越慢衰减
-    *   Nexus 连接越多 → 越慢衰减
+    *   Nexus 连接影响衰减属于待验证设想，当前代码未实现
 *   低于阈值 → 休眠 → 进一步降低 → 归档
 
 **(6) 抽象化 (Abstraction)**
@@ -631,9 +634,9 @@ episodic 记忆默认 rigidity = 0.15，属于 Layer B 可修改范围。用户�
           → 同一组输入的 projection_hash 永远相同
           → 重试、缓存命中、审计复现都正常工作
         - 不可预测: 接收方不知道 sender_private_noise_key，无法推导 noise_seed
-          → 无法区分真实边和噪声边
-        - 不可跨接收方关联: 不同 recipient_did 产出不同 noise_seed
-          → 两个接收方无法通过对比噪声模式推断真实拓扑
+          → 不足以证明无法区分真实边和噪声边
+        - 不同接收方的噪声种子不同（不保证不可关联）:
+          → 不构成不可关联的保证；多个接收方或快照可能通过交集推断稳定真实边
 
       noise_seed 何时变化:
         - source_commit_id 变化 (新 Epoch) → 自然变化
@@ -4415,7 +4418,7 @@ claude_memento() {
 | Phase 5: 再巩固（受 rigidity 门控） | - | - | - | - | ✅ | Y | Y | Y | Y |
 | Epoch light 自动触发（session_end） | - | - | - | - | ✅ | Y | Y | Y | Y |
 | Nexus 边衰减 | - | - | - | - | ✅ | Y | Y | Y | Y |
-| T5 抽象化（低频 engram 聚类） | - | - | - | - | ✅ | Y | Y | Y | Y |
+| T5 抽象化（低频 engram 聚类） | - | - | - | - | 未实现 | 未实现 | 未实现 | 未实现 | 未实现 |
 | Web Dashboard（FastAPI + Vue 3 SPA） | - | - | - | - | - | ✅ | Y | Y | Y |
 | Dashboard 记忆浏览/搜索/过滤 | - | - | - | - | - | ✅ | Y | Y | Y |
 | Dashboard verify/delete/pin 操作 | - | - | - | - | - | ✅ | Y | Y | Y |
@@ -4445,7 +4448,7 @@ claude_memento() {
 > - **v0.5.1b**（E2E 集成 + 打包）：Worker use_awake 修复、集成测试、hook-handler.sh 安全修复、entry points、`memento plugin install claude`。
 > - **v0.5.1c**（Subconscious 硬化）：rigidity 影响衰减速率、delta_ledger 去重、recon_buffer 清理、结构化日志。
 >
-> **v0.7 已完成**：LLM 管线、Phase 2 L2→L3 结构化、Phase 5 再巩固、Epoch 自动触发、T5 抽象化。
+> **v0.7 已完成**：LLM 管线、Phase 2 L2→L3 结构化、Phase 5 再巩固候选、Epoch 自动触发；T5 抽象化未实现。
 > **v0.8 已完成**：本地 Web Dashboard（FastAPI + Vue 3 SPA）。
 > **v0.9 已完成**：Conversation Memory Extraction（Stop hook + transcript 增量提炼 + LLM 自动提取）。
 > **v0.9.2 设计已完成，待实现**：分层上下文注入（L0/L1/L2 三层 priming）、本地嵌入优先（`provider="local"` 默认）、时序 Nexus 生命周期（`invalidated_at` + 自动失效 + 复活）。详见 `docs/superpowers/specs/2026-04-10-v092-mempalace-inspired-enhancements-design.md` 与 `docs/superpowers/plans/2026-04-10-v092-mempalace-enhancements.md`。
@@ -5010,7 +5013,7 @@ MemoryPR 的核心载荷。替代旧的快照式 `proposed_engrams` + `proposed_
 
 4.  **~~Snapshot 衰减 vs Hash 链完整性~~** → 墓碑机制，底层不可变、表现层可衰减（见 17.1 节）
 
-5.  **~~隐私图推断攻击~~** → Nexus 级联脱敏 + 拓扑噪声注入（见 17.4 节）
+5.  **隐私图推断攻击未解决**：拓扑噪声缺乏多视图及串谋隐私证明（见 5.2、17.4 节）
 
 6.  **~~合并冲突地狱~~** → 认知外交官代理，自动分流 95% 冲突（见 17.5 节）
 
@@ -5084,7 +5087,7 @@ MemoryPR 的核心载荷。替代旧的快照式 `proposed_engrams` + `proposed_
 
 42. **~~潜意识轨道资源边界矛盾~~** → 模态转换（Whisper/多模态模型）从潜意识轨道移至睡眠轨道 Phase 0；潜意识轨道恢复"纯数学、无推理模型"约束（见 12.3.1/12.5 节）
 
-43. **~~联邦投影噪声不确定性~~** → noise\_seed = HMAC(sender\_noise\_key, commit+recipient+mask\_version)，保证确定性（可重试/可缓存/可审计复现）+ 不可预测 + 不可跨接收方关联（见 5.2 节）
+43. **~~联邦投影噪声不确定性~~** → noise\_seed = HMAC(sender\_noise\_key, commit+recipient+mask\_version)，可提供确定性和种子不可预测性；不保证不可跨接收方关联（见 5.2 节）
 
 44. **~~MVP 验证无基线实验~~** → A/B 对照实验设计：Mode A (衰减+强化) vs Mode B (纯向量+时间)，预置标注集 + Precision\@3/MRR/过时记忆抑制率量化指标 + 明确优于阈值（见 22.4 节）
 
