@@ -208,6 +208,27 @@ class TestLayeredPriming:
         result = api.session_start(project=None, task="test", priming_max=5)
         assert len(result.priming_memories) <= 5
 
+    @pytest.mark.parametrize("budget", [0, 1, 2, 3, 4])
+    def test_small_budget_never_overflows(self, budget):
+        conn = _make_db()
+        for i in range(4):
+            _insert_engram(conn, f"p{i}", f"preference {i}", etype="preference")
+            _insert_engram(conn, f"c{i}", f"convention {i}", etype="convention")
+            _insert_engram(conn, f"f{i}", f"fact {i}", etype="fact")
+        result = self._make_api(conn).session_start(task="test", priming_max=budget)
+        assert len(result.priming_memories) <= budget
+
+    def test_l2_does_not_include_other_project(self):
+        conn = _make_db()
+        _insert_engram(conn, "private", "shared keyword", etype="debugging", project="other")
+        _insert_engram(conn, "global", "shared keyword", etype="debugging")
+        api = self._make_api(conn)
+        with patch("memento.awake.get_embedding", return_value=(None, 0, True)):
+            result = api.session_start(project="mine", task="shared keyword")
+        ids = {m["id"] for m in result.priming_memories}
+        assert "global" in ids
+        assert "private" not in ids
+
 
 class TestMCPPrimingFormat:
     """Tests for MCP priming prompt layer formatting."""

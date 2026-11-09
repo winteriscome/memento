@@ -618,17 +618,11 @@ def test_phase5_llm_reconsolidation(conn):
 
     assert mock_llm.generate_json.called
 
-    engram = conn.execute(
-        "SELECT content, content_hash, embedding_pending FROM engrams WHERE id='eng-recon-llm'"
-    ).fetchone()
-    assert "TTL" in engram["content"]
-    # Hash must match new content
-    expected_hash = hashlib.sha256(
-        "redis cache config: set ttl to 3600s for session keys".encode()
-    ).hexdigest()
-    assert engram["content_hash"] == expected_hash
-    # Embedding must be invalidated
-    assert engram["embedding_pending"] == 1
+    engram = conn.execute("SELECT content FROM engrams WHERE id='eng-recon-llm'").fetchone()
+    assert engram["content"] == "Redis cache config"
+    candidate = conn.execute("SELECT old_content, proposed_content FROM reconsolidation_candidates WHERE engram_id='eng-recon-llm'").fetchone()
+    assert candidate["old_content"] == engram["content"]
+    assert "TTL" in candidate["proposed_content"]
 
 
 def test_phase5_high_rigidity_skips_llm(conn):
@@ -650,3 +644,28 @@ def test_phase5_high_rigidity_skips_llm(conn):
         "SELECT content FROM engrams WHERE id='eng-rigid'"
     ).fetchone()
     assert engram["content"] == "Never use SELECT *"  # Unchanged
+
+
+def test_epoch_failure_rolls_back_all_phase_writes(conn):
+    from memento.epoch import acquire_lease, run_epoch_phases
+    _insert_capture(conn, "cap-rollback", "must remain buffered")
+    epoch_id = acquire_lease(conn, "default", "full", "manual")
+    with patch("memento.epoch._phase7_view_store", side_effect=RuntimeError("failure")):
+        with pytest.raises(RuntimeError):
+            run_epoch_phases(conn, epoch_id, "full")
+    assert conn.execute("SELECT COUNT(*) FROM engrams WHERE content='must remain buffered'").fetchone()[0] == 0
+    row = conn.execute("SELECT epoch_id FROM capture_log WHERE id='cap-rollback'").fetchone()
+    assert row[0] is None
+    assert conn.execute("SELECT status FROM epochs WHERE id=?", (epoch_id,)).fetchone()[0] == "failed"
+
+
+def test_decay_is_evaluated_once_and_legacy_deltas_are_consumed(conn):
+    from memento.epoch import _phase3_delta_fold
+    from memento.decay import effective_strength
+    _insert_engram(conn, "eng-d", "memory", strength=0.7, rigidity=0.0)
+    _insert_delta(conn, "eng-d", "decay", -0.2)
+    _phase3_delta_fold(conn, "ep", "2026-04-03T00:00:00+00:00")
+    row = conn.execute("SELECT * FROM engrams WHERE id='eng-d'").fetchone()
+    assert row["strength"] == 0.7
+    assert effective_strength(row["strength"], row["last_accessed"], 0, "normal", now=datetime(2026, 4, 8, 12, tzinfo=timezone.utc)) == pytest.approx(0.7 / 2**0.5)
+    assert conn.execute("SELECT epoch_id FROM delta_ledger").fetchone()[0] == "ep"

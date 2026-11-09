@@ -290,21 +290,8 @@ def test_run_decay_cycle_creates_deltas():
 
         track._run_decay_cycle(conn)
 
-    # Should have decay deltas for active engrams
-    decay_deltas = conn.execute(
-        "SELECT * FROM delta_ledger WHERE delta_type='decay'"
-    ).fetchall()
-    assert len(decay_deltas) > 0
-
-    # delta_value should be negative (decay)
-    for delta in decay_deltas:
-        assert delta["delta_value"] < 0.0
-
-    # decay_watermark should be updated
-    new_watermark = conn.execute(
-        "SELECT value FROM runtime_cursors WHERE key='decay_watermark'"
-    ).fetchone()[0]
-    assert new_watermark == "2026-04-01T12:00:00+00:00"
+    # Reads and archival evaluate elapsed time directly; no periodic ledger writes.
+    assert conn.execute("SELECT COUNT(*) FROM delta_ledger WHERE delta_type='decay'").fetchone()[0] == 0
 
 
 def test_run_decay_cycle_respects_min_delta():
@@ -392,3 +379,19 @@ def test_clean_recon_buffer_keeps_recent_fully_consumed():
 
     count = conn.execute("SELECT COUNT(*) FROM recon_buffer").fetchone()[0]
     assert count == 1
+
+
+def test_replayed_event_in_later_batch_does_not_reinforce_twice():
+    from memento.repository import rebuild_view_store
+    from memento.subconscious import SubconsciousTrack
+    conn = _make_v05_db()
+    rebuild_view_store(conn, "epoch-test")
+    q = Queue()
+    track = SubconsciousTrack(lambda: conn, q, {})
+    event = {"engram_id": "e1", "timestamp": "2026-04-01T12:05:00+00:00",
+             "idempotency_key": "same-event", "query_context": "redis"}
+    q.put(event)
+    track._drain_pulse_events(conn)
+    q.put(event)
+    track._drain_pulse_events(conn)
+    assert conn.execute("SELECT COUNT(*) FROM delta_ledger WHERE delta_type='reinforce'").fetchone()[0] == 1

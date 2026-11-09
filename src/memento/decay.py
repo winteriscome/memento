@@ -29,12 +29,13 @@ def _hours_since(last_accessed: str, now: datetime | None = None) -> float:
     if now is None:
         now = datetime.now()
     last = datetime.fromisoformat(last_accessed)
-    # Strip tzinfo from both to avoid aware/naive TypeError
-    if last.tzinfo is not None:
-        last = last.replace(tzinfo=None)
-    if now.tzinfo is not None:
-        now = now.replace(tzinfo=None)
-    return (now - last).total_seconds() / 3600.0
+    # Treat legacy naive timestamps as UTC; convert aware offsets correctly.
+    from datetime import timezone
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - last).total_seconds() / 3600.0)
 
 
 def effective_strength(

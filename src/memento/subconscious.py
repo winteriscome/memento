@@ -112,6 +112,7 @@ class SubconsciousTrack:
 
         now = datetime.now(timezone.utc).isoformat()
 
+        conn.execute("CREATE TABLE IF NOT EXISTS pulse_event_keys (idempotency_key TEXT PRIMARY KEY)")
         for event in events:
             engram_id = event["engram_id"]
 
@@ -130,33 +131,27 @@ class SubconsciousTrack:
             # Convert Row to dict
             engram_dict = dict(engram)
 
-            # Compute reinforce delta
-            delta = compute_reinforce_delta(engram_dict, now=event["timestamp"])
-
-            # Insert into delta_ledger
-            conn.execute(
-                "INSERT INTO delta_ledger (engram_id, delta_type, delta_value, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (delta["engram_id"], delta["delta_type"], delta["delta_value"], now),
-            )
-
-            # Insert into recon_buffer (with idempotency)
+            # Reserve the event key before writing any effects. Both writes commit
+            # together; an event replay in a later batch cannot reinforce twice.
             try:
+                conn.execute("INSERT INTO pulse_event_keys (idempotency_key) VALUES (?)", (event["idempotency_key"],))
                 coactivated_json = json.dumps(event.get("coactivated_ids", []))
                 conn.execute(
                     "INSERT INTO recon_buffer "
                     "(engram_id, query_context, coactivated_ids, idempotency_key, created_at) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (
-                        engram_id,
-                        event.get("query_context"),
-                        coactivated_json,
-                        event["idempotency_key"],
-                        now,
-                    ),
+                    (engram_id, event.get("query_context"), coactivated_json,
+                     event["idempotency_key"], now),
                 )
             except sqlite3.IntegrityError:
-                logger.debug(f"Duplicate idempotency_key for engram {engram_id}, skipping recon_buffer")
+                logger.debug("Duplicate pulse event for engram %s", engram_id)
+                continue
+            delta = compute_reinforce_delta(engram_dict, now=event["timestamp"])
+            conn.execute(
+                "INSERT INTO delta_ledger (engram_id, delta_type, delta_value, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (engram_id, "reinforce", delta["delta_value"], event["timestamp"]),
+            )
 
         conn.commit()
 
@@ -180,55 +175,9 @@ class SubconsciousTrack:
             conn.rollback()
 
     def _run_decay_cycle(self, conn: sqlite3.Connection):
-        """Periodic decay computation.
+        """Decay is evaluated from the strength anchor on reads and archival.
 
-        1. Read decay_watermark from runtime_cursors
-        2. Query view_engrams for active engrams
-        3. compute_decay_deltas(engrams, watermark, now)
-        4. Batch INSERT delta_ledger
-        5. update_decay_watermark(conn, new_watermark)
+        Do not write decay deltas: folding them and then applying the same
+        elapsed time on reads double-counts decay.
         """
-        now = datetime.now(timezone.utc).isoformat()
-
-        # Read decay_watermark
-        watermark_row = conn.execute(
-            "SELECT value FROM runtime_cursors WHERE key='decay_watermark'"
-        ).fetchone()
-
-        if not watermark_row:
-            # No watermark, initialize it
-            update_decay_watermark(conn, now)
-            return
-
-        watermark = watermark_row["value"]
-
-        # Query active engrams from view_engrams
-        engrams = conn.execute(
-            "SELECT id, strength, last_accessed, access_count, importance, rigidity "
-            "FROM view_engrams"
-        ).fetchall()
-
-        if not engrams:
-            return
-
-        # Convert Rows to dicts
-        engrams_list = [dict(row) for row in engrams]
-
-        try:
-            # Compute decay deltas
-            deltas, new_watermark = compute_decay_deltas(engrams_list, watermark, now)
-
-            # Batch insert deltas
-            for delta in deltas:
-                conn.execute(
-                    "INSERT INTO delta_ledger (engram_id, delta_type, delta_value, created_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (delta["engram_id"], delta["delta_type"], delta["delta_value"], now),
-                )
-
-            # Update watermark
-            update_decay_watermark(conn, new_watermark)
-            conn.commit()
-        except Exception as e:
-            logger.error(f"Error computing decay deltas: {e}", exc_info=True)
-            conn.rollback()
+        return

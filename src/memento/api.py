@@ -179,6 +179,7 @@ class LocalAPI(MementoAPIBase):
         """
         if priming_max is None:
             priming_max = self.PRIMING_MAX_DEFAULT
+        priming_max = max(0, priming_max)
 
         session_id = self._session_svc.start(
             project=project, task=task, metadata=metadata
@@ -194,7 +195,7 @@ class LocalAPI(MementoAPIBase):
             conn, types=["preference", "convention"],
             project=project, order_by="strength",
         )
-        l0 = self._select_l0(l0_candidates, self.L0_BUDGET)
+        l0 = self._select_l0(l0_candidates, min(self.L0_BUDGET, priming_max))
         for m in l0:
             m["layer"] = "L0"
         priming.extend(l0)
@@ -206,7 +207,7 @@ class LocalAPI(MementoAPIBase):
             conn, types=["decision", "fact", "insight"],
             project=project, order_by="last_accessed",
         )
-        l1 = self._select_l1(l1_candidates, self.L1_BUDGET, exclude_ids=l0_ids)
+        l1 = self._select_l1(l1_candidates, min(self.L1_BUDGET, priming_max - len(l0)), exclude_ids=l0_ids)
         for m in l1:
             m["layer"] = "L1"
         priming.extend(l1)
@@ -224,6 +225,16 @@ class LocalAPI(MementoAPIBase):
                 # self.recall() returns list[dict] when _use_awake=True
                 mid = m["id"] if isinstance(m, dict) else m.id
                 if mid in exclude_ids:
+                    continue
+                # Enforce the same project/global boundary as L0 and L1.
+                # Unknown sources fail closed rather than exposing another project.
+                source_table = "capture_log" if isinstance(m, dict) and m.get("provisional") else "engrams"
+                source = conn.execute(
+                    f"SELECT e.source_session_id, s.id, s.project FROM {source_table} e LEFT JOIN sessions s "
+                    "ON e.source_session_id=s.id WHERE e.id=?", (mid,),
+                ).fetchone()
+                if (source is None or (source[0] is not None and source[1] is None)
+                        or (source[2] is not None and source[2] != project)):
                     continue
                 if not isinstance(m, dict):
                     m = {
@@ -261,15 +272,17 @@ class LocalAPI(MementoAPIBase):
 
     def _select_l1(self, candidates: list[dict], budget: int, exclude_ids: set) -> list[dict]:
         """L1: decision/fact/insight, top-2 by effective_strength."""
-        from datetime import datetime
+        from datetime import datetime, timezone
         from memento.decay import effective_strength as compute_eff_strength
         from memento.rigidity import RIGIDITY_DEFAULTS
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         scored = []
         for c in candidates:
             if c["id"] in exclude_ids:
                 continue
-            rigidity = c.get("rigidity") or RIGIDITY_DEFAULTS.get(c.get("type", "fact"), 0.5)
+            rigidity = c.get("rigidity")
+            if rigidity is None:
+                rigidity = RIGIDITY_DEFAULTS.get(c.get("type", "fact"), 0.5)
             eff = compute_eff_strength(
                 strength=c["strength"], last_accessed=c.get("last_accessed", now.isoformat()),
                 access_count=c.get("access_count", 0), importance=c.get("importance", "normal"),

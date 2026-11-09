@@ -257,35 +257,33 @@ def _phase2_l2_consolidation(conn: sqlite3.Connection, epoch_id: str,
 def _phase3_delta_fold(conn: sqlite3.Connection, epoch_id: str,
                         seal_timestamp: str) -> None:
     """Phase 3: Delta fold + strength 更新。"""
+    # Process each reinforcement at its event time. Legacy pending decay
+    # entries are consumed without reapplying elapsed time to stored strength.
+    from memento.decay import effective_strength
     rows = conn.execute(
-        "SELECT * FROM delta_ledger "
-        "WHERE epoch_id IS NULL AND created_at < ?",
-        (seal_timestamp,),
+        "SELECT * FROM delta_ledger WHERE epoch_id IS NULL AND created_at < ? "
+        "ORDER BY created_at, id", (seal_timestamp,),
     ).fetchall()
+    for delta in rows:
+        row = conn.execute("SELECT * FROM engrams WHERE id=?", (delta["engram_id"],)).fetchone()
+        if row is not None and delta["delta_type"] == "reinforce":
+            event_time = datetime.fromisoformat(delta["created_at"])
+            last = datetime.fromisoformat(row["last_accessed"])
+            # Never move an anchor backwards when delayed legacy events arrive.
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            if event_time.tzinfo is None:
+                event_time = event_time.replace(tzinfo=timezone.utc)
+            anchor = max(last, event_time)
+            value = effective_strength(row["strength"], row["last_accessed"],
+                row["access_count"], row["importance"], now=anchor,
+                rigidity=row["rigidity"] if row["rigidity"] is not None else 0.0)
+            cap = 0.5 if row["origin"] == "agent" and not row["verified"] else 1.0
+            value = max(0.0, min(cap, value + delta["delta_value"]))
+            conn.execute("UPDATE engrams SET strength=?, access_count=access_count+1, last_accessed=? WHERE id=?",
+                         (value, anchor.isoformat(), row["id"]))
+        conn.execute("UPDATE delta_ledger SET epoch_id=? WHERE id=?", (epoch_id, delta["id"]))
 
-    if not rows:
-        return
-
-    deltas = [dict(r) for r in rows]
-    folds = fold_deltas(deltas)
-
-    if not folds:
-        return
-
-    # Build engrams lookup for plan_strength_updates
-    engram_ids = list({f.engram_id for f in folds})
-    placeholders = ",".join("?" * len(engram_ids))
-    engrams_rows = conn.execute(
-        f"SELECT id, strength, access_count, origin, verified "
-        f"FROM engrams WHERE id IN ({placeholders})",
-        engram_ids,
-    ).fetchall()
-    engrams_lookup = {
-        r["id"]: dict(r) for r in engrams_rows
-    }
-
-    plans = plan_strength_updates(folds, engrams_lookup)
-    apply_strength_plan(conn, plans, epoch_id)
 
 
 def _phase4_nexus_updates(conn: sqlite3.Connection, epoch_id: str,
@@ -388,23 +386,28 @@ def _phase5_reconsolidation(conn: sqlite3.Connection, epoch_id: str,
                 if prompt:
                     try:
                         result = llm_client.generate_json(prompt)
-                        if isinstance(result, dict) and result.get("changed"):
-                            import hashlib as _hashlib
-                            new_content = result.get("content", engram_row["content"])
-                            new_hash = _hashlib.sha256(
-                                new_content.strip().lower().encode()
-                            ).hexdigest()
-                            # Fix #2: update content + hash, clear stale embedding
-                            conn.execute(
-                                """UPDATE engrams
-                                   SET content=?, content_hash=?,
-                                       embedding=NULL, embedding_dim=NULL,
-                                       embedding_pending=1
-                                   WHERE id=?""",
-                                (new_content, new_hash, engram_id),
-                            )
                     except Exception:
-                        pass  # LLM failure — leave content unchanged
+                        logger.warning("Reconsolidation generation failed for %s", engram_id, exc_info=True)
+                        result = None
+                    if isinstance(result, dict) and result.get("changed"):
+                        # Do not overwrite factual memory until a semantic
+                        # drift verifier exists. Keep a reviewable candidate.
+                        new_content = result.get("content", engram_row["content"])
+                        if isinstance(new_content, str) and new_content != engram_row["content"]:
+                            conn.execute(
+                                "CREATE TABLE IF NOT EXISTS reconsolidation_candidates ("
+                                "id INTEGER PRIMARY KEY, engram_id TEXT NOT NULL, "
+                                "epoch_id TEXT NOT NULL, old_content TEXT NOT NULL, "
+                                "proposed_content TEXT NOT NULL, created_at TEXT NOT NULL)"
+                            )
+                            conn.execute(
+                                "INSERT INTO reconsolidation_candidates "
+                                "(engram_id, epoch_id, old_content, proposed_content, created_at) "
+                                "VALUES (?, ?, ?, ?, ?)",
+                                (engram_id, epoch_id, engram_row["content"], new_content,
+                                 datetime.now(timezone.utc).isoformat()),
+                            )
+
 
             # Mark consumed regardless of LLM outcome
             for r in recon_rows:
@@ -445,24 +448,19 @@ def _phase6_state_transitions(conn: sqlite3.Connection, epoch_id: str, mode: str
     T6: consolidated → archived (strength < ARCHIVE_THRESHOLD)
     T5: abstraction 延迟到 v0.5.1
     """
-    # T6: Archive low-strength engrams
-    low_strength = conn.execute(
-        "SELECT id FROM engrams "
-        "WHERE state='consolidated' AND strength < ?",
-        (ARCHIVE_THRESHOLD,),
-    ).fetchall()
-
-    for row in low_strength:
-        plan = TransitionPlan(
-            engram_id=row["id"],
-            capture_log_id=None,
-            from_state="consolidated",
-            to_state="archived",
-            transition="T6",
-            reason=f"strength below archive threshold ({ARCHIVE_THRESHOLD})",
-            epoch_id=epoch_id,
-        )
-        apply_transition_plan(conn, plan)
+    # Evaluate the same decay curve used by recall, without persisting decay.
+    from memento.decay import effective_strength
+    now = datetime.now(timezone.utc)
+    for row in conn.execute("SELECT * FROM engrams WHERE state='consolidated'").fetchall():
+        value = effective_strength(row["strength"], row["last_accessed"],
+            row["access_count"], row["importance"], now=now,
+            rigidity=row["rigidity"] if row["rigidity"] is not None else 0.0)
+        if value < ARCHIVE_THRESHOLD:
+            plan = TransitionPlan(engram_id=row["id"], capture_log_id=None,
+                from_state="consolidated", to_state="archived", transition="T6",
+                reason=f"effective strength below archive threshold ({ARCHIVE_THRESHOLD})",
+                epoch_id=epoch_id)
+            apply_transition_plan(conn, plan)
 
     # T5: Abstraction deferred to v0.5.1
     # v0.5.0: T5 abstraction requires clustering infrastructure (not yet implemented).
@@ -478,6 +476,18 @@ def _phase7_view_store(conn: sqlite3.Connection, epoch_id: str) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 # Main Runner
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+class _EpochConnection:
+    """Defer helper commits until the encompassing epoch commits."""
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def commit(self):
+        pass
 
 
 def run_epoch_phases(conn: sqlite3.Connection, epoch_id: str,
@@ -506,14 +516,18 @@ def run_epoch_phases(conn: sqlite3.Connection, epoch_id: str,
         ).fetchone()
         seal_timestamp = row["seal_timestamp"]
 
+        # Repository helpers normally commit individually. Inside an epoch,
+        # route them through a connection facade that defers those commits.
+        conn.execute("BEGIN IMMEDIATE")
+        phase_conn = _EpochConnection(conn)
         # Execute phases 1-7
-        _phase1_pending_forget(conn, epoch_id)
-        _phase2_l2_consolidation(conn, epoch_id, seal_timestamp, mode, llm_client)
-        _phase3_delta_fold(conn, epoch_id, seal_timestamp)
-        _phase4_nexus_updates(conn, epoch_id, seal_timestamp)
-        _phase5_reconsolidation(conn, epoch_id, seal_timestamp, mode, llm_client)
-        _phase6_state_transitions(conn, epoch_id, mode)
-        _phase7_view_store(conn, epoch_id)
+        _phase1_pending_forget(phase_conn, epoch_id)
+        _phase2_l2_consolidation(phase_conn, epoch_id, seal_timestamp, mode, llm_client)
+        _phase3_delta_fold(phase_conn, epoch_id, seal_timestamp)
+        _phase4_nexus_updates(phase_conn, epoch_id, seal_timestamp)
+        _phase5_reconsolidation(phase_conn, epoch_id, seal_timestamp, mode, llm_client)
+        _phase6_state_transitions(phase_conn, epoch_id, mode)
+        _phase7_view_store(phase_conn, epoch_id)
 
         # Success
         now = datetime.now(timezone.utc).isoformat()

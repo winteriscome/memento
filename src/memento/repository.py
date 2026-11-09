@@ -182,6 +182,9 @@ def apply_pending_forgets(conn: sqlite3.Connection,
                 "DELETE FROM recon_buffer WHERE engram_id=?",
                 (target_id,),
             )
+            # Candidates contain copies of the original and proposed content.
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reconsolidation_candidates'").fetchone():
+                conn.execute("DELETE FROM reconsolidation_candidates WHERE engram_id=?", (target_id,))
             # Nexus cleaned by CASCADE (ON DELETE CASCADE on engrams)
             # But state='forgotten' doesn't delete the row, so we delete nexus explicitly
             conn.execute(
